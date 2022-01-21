@@ -1,10 +1,7 @@
 import beeper from 'beeper';
-import Web3 from 'web3';
 import log from 'simple-node-logger';
 import { cts } from './utils/constants.js';
 import { Marketplace } from './Marketplace.js';
-import { Wallet } from './Wallet.js';
-import { WalletWatcher } from './WalletWatcher.js';
 import { CoinWatcher } from './CoinWatcher.js';
 import fs from 'fs';
 import dotenv from 'dotenv';
@@ -28,34 +25,31 @@ function setupLogger() {
 async function main() {
 	try {
 		const earnExpectPercentage = parseFloat(process.argv[2]) || 0.5;
+		const wbnbBalance = parseFloat(process.argv[3]) || 1;
+		logger.info('Earn expect percentage: ' + earnExpectPercentage);
+		logger.info('WBNB Balance: ' + wbnbBalance);
 		console.log('Earn expect percentage: ' + earnExpectPercentage);
-
-		const web3 = new Web3(process.env.BSC_PROVIDER || 'https://data-seed-prebsc-1-s1.binance.org:8545');
-		const wallet = new Wallet(web3);
-
-		const walletWatcher = new WalletWatcher(wallet);
-		await walletWatcher.start();
+		console.log('WBNB Balance: ' + wbnbBalance);
 
 		const coinWatcher = new CoinWatcher();
 		await coinWatcher.start();
 
-		const marketplace = new Marketplace(web3, wallet, coinWatcher);
-		await marketplace.connect();
+		const marketplace = new Marketplace();
 
-		await tradeRoutine(wallet, walletWatcher, coinWatcher, marketplace, earnExpectPercentage);
+		await findBestThetans(coinWatcher, marketplace, earnExpectPercentage, wbnbBalance);
 	} catch (e: any) {
 		logger.error(`App crashed:  ${e.message}`);
+		console.error(`App crashed:  ${e.message}`);
 		console.log('Restarting...');
 		await main();
 	}
 }
 
-async function tradeRoutine(
-	wallet: Wallet,
-	walletWatcher: WalletWatcher,
+async function findBestThetans(
 	coinWatcher: CoinWatcher,
 	marketplace: Marketplace,
-	earnExpectPercentage: number
+	earnExpectPercentage: number,
+	wbnbBalance: number
 ) {
 	let lastGoodThetansIds: any[] = [];
 
@@ -83,8 +77,8 @@ async function tradeRoutine(
 		);
 
 		// *Price lower than my WBNB balance*
-		bestThetans = bestThetans.filter((hero) => hero.price / 1e8 < walletWatcher.balance.WBNB);
-		console.log(`Thetans number (less than ${walletWatcher.balance.WBNB} WBNB): ${bestThetans.length}`);
+		bestThetans = bestThetans.filter((hero) => hero.price / 1e8 < wbnbBalance);
+		//console.log(`Thetans number (less than ${wbnbBalance} WBNB): ${bestThetans.length}`);
 
 		// *Earn potential percentage higher than earnExpectPercentage*
 		bestThetans = bestThetans.filter((hero, index) => {
@@ -102,14 +96,14 @@ async function tradeRoutine(
 			}
 			return earnRate >= earnExpectPercentage;
 		});
-		console.log(`Thetans number (good earn potential): ${bestThetans.length}`);
+		//console.log(`Thetans number (good earn potential): ${bestThetans.length}`);
 
 		// *Remove unwanted thetans*
 		bestThetans = bestThetans.filter((hero) => {
 			// Increase difficulty of getting shitty Veinkas
-			if (hero.name === 'Veinka' && hero.earnRate < earnExpectPercentage * 1.3) {
+			/*if (hero.name === 'Veinka' && hero.earnRate < earnExpectPercentage * 1.3) {
 				return false;
-			}
+			}*/
 			return hero;
 		});
 
@@ -130,60 +124,22 @@ async function tradeRoutine(
 		return bestThetans.sort((a, b) => b.earnRate - a.earnRate);
 	}
 
-	async function verifyBalances(thetan: any) {
-		if (walletWatcher.balance.WBNB < thetan.price / 1e8) {
-			console.log('Not enough WBNB balance! Updating balance...');
-			await walletWatcher.update();
-			beeper(1);
-			return false;
-		}
-		if (walletWatcher.balance.BNB < cts.MARKETPLACE_MAX_GAS_PRICE * cts.MARKETPLACE_BUY_GAS * 1e-9) {
-			const buyAmount = cts.MARKETPLACE_MAX_GAS_PRICE * cts.MARKETPLACE_BUY_GAS * 1e-9 * 2;
-			logger.warn(`Not enough BNB balance, buying ${buyAmount} BNB!`);
-			await wallet.unwrapBNB(buyAmount);
-			await walletWatcher.update();
-			beeper(1);
-			return false;
-		}
-		return true;
-	}
-
-	async function buyThetan(thetan: any) {
-		const result = await marketplace.buyThetan(
-			thetan.id,
-			thetan.tokenId,
-			thetan.price,
-			thetan.earnPotentialDollar,
-			thetan.ownerAddress
-		);
-		if (result.success) {
-			await beeper('*-*-*');
-			logger.info(`
-SUCCESSFULLY bought ${thetan.name}(${thetan.id}):
+	async function logBestThetans(thetans: any[]) {
+		await beeper('*-*-*');
+		thetans.forEach((thetan: any) => {
+			logger.info(`${thetan.name}(${thetan.id}):
 	Current Time: ${new Date(Date.now()).toLocaleString()}
-	TX Hash: ${result?.tx?.transactionHash}
-	Gas Used: ${result?.tx?.gasUsed}
-	Gas Price: ${result?.tx?.gasPrice}
-	Price: $${thetan.heroPriceDollar}; WBNB ${thetan.price / 1e8}
-	Price Total (gas + price): WBNB${(thetan.price / 1e8 + (result.tx.gasUsed * result.gasPrice) / 1e9).toFixed(6)}}}
-	Earn Potential: $${thetan.earnPotentialDollar}
-	Earn Rate: ${(thetan.earnRate * 100).toFixed(2)}%
-	Link: https://marketplace.thetanarena.com/item/${thetan.refId}`);
-			await walletWatcher.update();
-		} else {
-			await beeper(1);
-			logger.error(`
-FAILED to buy ${thetan.name}(${thetan.id}):
-	Error message: ${result.message}
-	Current Time: ${new Date(Date.now()).toLocaleString()}
-	TX Hash: ${result?.tx?.transactionHash}
-	Gas Used: ${result?.tx?.gasUsed}
-	Gas Price: ${result?.tx?.gasPrice}
 	Price: $${thetan.heroPriceDollar}; WBNB ${thetan.price / 1e8}
 	Earn Potential: $${thetan.earnPotentialDollar}
 	Earn Rate: ${(thetan.earnRate * 100).toFixed(2)}%
 	Link: https://marketplace.thetanarena.com/item/${thetan.refId}`);
-		}
+			console.log(`${thetan.name}(${thetan.id}):
+	Current Time: ${new Date(Date.now()).toLocaleString()}
+	Price: $${thetan.heroPriceDollar}; WBNB ${thetan.price / 1e8}
+	Earn Potential: $${thetan.earnPotentialDollar}
+	Earn Rate: ${(thetan.earnRate * 100).toFixed(2)}%
+	Link: https://marketplace.thetanarena.com/item/${thetan.refId}`);
+		});
 	}
 
 	let iterations = 0;
@@ -199,12 +155,7 @@ FAILED to buy ${thetan.name}(${thetan.id}):
 				lastGoodThetansIds.push(...bestThetans.map((hero) => hero.id));
 				continue;
 			}
-
-			const isBalanceValid = await verifyBalances(bestThetans[0]);
-			if (!isBalanceValid) continue;
-			await buyThetan(bestThetans[0]);
-			await walletWatcher.update();
-			await verifyBalances(bestThetans[0]); // Buy gas if needed
+			await logBestThetans(bestThetans);
 			lastGoodThetansIds.push(...bestThetans.map((hero) => hero.id));
 		}
 		iterations++;
